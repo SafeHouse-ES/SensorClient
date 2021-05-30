@@ -3,15 +3,15 @@ package com.safehouse.sensordata;
 public class Sensor {
     private String id;
     private double temperature;
-    private double humidity;
     private double luminosity;
+    private boolean movement;
     private long timestamp;
 
-    public Sensor(String id, double temperature, double humidity, double luminosity, long timestamp) {
+    public Sensor(String id, double temperature, double luminosity, boolean movement, long timestamp) {
         this.id = id;
         this.temperature = temperature;
-        this.humidity = humidity;
         this.luminosity = luminosity;
+        this.movement = movement;
         this.timestamp = timestamp;
     }
 
@@ -23,12 +23,12 @@ public class Sensor {
         return temperature;
     }
 
-    public double getHumidity() {
-        return humidity;
-    }
-
     public double getLuminosity() {
         return luminosity;
+    }
+
+    public boolean getMovement() {
+        return movement;
     }
 
     public long getTimestamp() {
