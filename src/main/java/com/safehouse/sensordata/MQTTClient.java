@@ -1,13 +1,21 @@
 package com.safehouse.sensordata;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import org.eclipse.paho.client.mqttv3.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.net.*;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Calendar;
 import java.util.Random;
 import java.util.TimeZone;
+import java.io.InputStreamReader;
 
 public class MQTTClient {
+
     public static void main(String[] args) throws MqttException {
         String publisherId = "1";
         IMqttClient publisher= null;
@@ -16,30 +24,31 @@ public class MQTTClient {
         } catch (MqttException e){
 
         }
+        PublishersSR publishersSR= new PublishersSR();
         MqttConnectOptions options = new MqttConnectOptions();
         options.setAutomaticReconnect(true);
         options.setCleanSession(true);
-        options.setConnectionTimeout(10);
+        options.setConnectionTimeout(30);
         publisher.connect(options);
-        SensorData sd0= new SensorData(publisher, "Kitchen");
-        SensorData sd1= new SensorData(publisher, "LivingRoom");
-        SensorData sd2= new SensorData(publisher, "Room1");
-        SensorData sd3= new SensorData(publisher, "Room2");
+        SensorData sd0= new SensorData(publisher, "Kitchen", publishersSR);
+        SensorData sd1= new SensorData(publisher, "LivingRoom", publishersSR);
+        SensorData sd2= new SensorData(publisher, "Room1", publishersSR);
+        SensorData sd3= new SensorData(publisher, "Room2", publishersSR);
         sd0.start();
         try {
-            Thread.sleep(2000);
+            Thread.sleep(10000);
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
         sd1.start();
         try {
-            Thread.sleep(2000);
+            Thread.sleep(10000);
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
         sd2.start();
         try {
-            Thread.sleep(2000);
+            Thread.sleep(10000);
         } catch (InterruptedException e) {
             e.printStackTrace();
         }
@@ -67,50 +76,44 @@ public class MQTTClient {
     }
 }
 
-class SensorData extends Thread{
+class PublishersSR {
+
+    private boolean free = true;
 
     public static final String TOPIC = "es31_sensordata";
 
-    private IMqttClient client;
-    private Random rnd = new Random();
-    private String sensorId;
-
-    public SensorData(IMqttClient client, String sensorId) {
-        this.client = client;
-        this.sensorId= sensorId;
-    }
-
-    @Override
-    public void run() {
-
-        if ( !client.isConnected()) {
-            return ;
-        }
-        while (true) {
-            MqttMessage msg = formMessage();
-            msg.setQos(0);
-            msg.setRetained(true);
+    public synchronized void publishMessage(IMqttClient client, String sensorId){
+        while(!free) {
             try {
-                client.publish(TOPIC, msg);
-            } catch (MqttException e) {
-                e.printStackTrace();
-            }
-            try {
-                Thread.sleep(60*1000);
+                wait();
             } catch (InterruptedException e) {
                 e.printStackTrace();
             }
         }
+
+        free= false;
+        MqttMessage msg = formMessage(sensorId);
+        msg.setQos(0);
+        msg.setRetained(true);
+        try {
+            client.publish(TOPIC, msg);
+        } catch (MqttException e) {
+            e.printStackTrace();
+        }
+
+        free= true;
+        notifyAll();
     }
 
     /**
      * This method simulates reading the engine temperature
      * @return
      */
-    private MqttMessage formMessage() {
+    private MqttMessage formMessage(String sensorId) {
         ObjectMapper mapper = new ObjectMapper();
-        Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("GMT+1:00"));
-        Sensor sensor = new Sensor(sensorId, getTemperature(cal) , getLuminosity(cal), getMovement(cal), cal.getTimeInMillis());
+        Calendar cal = Calendar.getInstance();
+        cal.setTimeZone(TimeZone.getTimeZone("GMT+1:00"));
+        Sensor sensor = new Sensor(sensorId, getTemperature(cal, sensorId) , getLuminosity(cal, sensorId), getMovement(cal, sensorId), Instant.now().toEpochMilli());
         byte[] payload= null;
         try {
             payload = mapper.writeValueAsBytes(sensor);
@@ -121,23 +124,97 @@ class SensorData extends Thread{
         return msg;
     }
 
-    private double getTemperature(Calendar cal){
+    private double getTemperature(Calendar cal, String sensorId) {
         double temp= 0;
         int minutes= cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE);
-        temp = 20.5137 - 0.0341183 * (Math.pow(Math.abs(minutes-720),0.874271))+ Math.random()*2;
+        temp = 20.5137 - 0.0341183 * (Math.pow(Math.abs(minutes-720),0.874271))+ Math.random() - 0.5;
+        double actemp= 0;
+
+        URL url = null;
+        try {
+            url = new URL("http://192.168.160.87:31006/device?id="+sensorId+"&dev=ac");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Accept", "application/json");
+
+            if (conn.getResponseCode() != 200) {
+                throw new RuntimeException("Failed : HTTP error code : "
+                        + conn.getResponseCode());
+            }
+
+            BufferedReader br = new BufferedReader(new InputStreamReader(
+                    (conn.getInputStream())));
+
+            String output;
+
+            while ((output = br.readLine()) != null) {
+                if (!output.equals("{}")) {
+                    ObjectMapper mapper = new ObjectMapper();
+                    JsonNode actualObj = mapper.readTree(output);
+                    actemp = Double.parseDouble(actualObj.get("value").asText());
+                }
+            }
+            conn.disconnect();
+        } catch (MalformedURLException e) {
+            e.printStackTrace();
+        } catch (IOException e1) {
+            e1.printStackTrace();
+        }
+
+
+        if (actemp != 0.0){
+            temp = (temp + actemp * 3) / 4;
+        }
         return temp;
     }
 
-    private double getLuminosity(Calendar cal){
+    private double getLuminosity(Calendar cal, String sensorId){
         double lum= 0;
         int minutes= cal.get(Calendar.HOUR_OF_DAY) * 60 + cal.get(Calendar.MINUTE);
         if (minutes > 360 && minutes < 1320){
-            lum = 517.419 - 7.21052 * (Math.pow(Math.abs(minutes-840),0.684096)) + Math.random()*5;
+            lum = 517.419 - 7.21052 * (Math.pow(Math.abs(minutes-840),0.684096)) + Math.random()*2;
         }
+
+        double sllum= 0;
+        URL url = null;
+        try {
+            url = new URL("http://192.168.160.87:31006/device?id="+sensorId+"&dev=sl");
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            conn.setRequestMethod("GET");
+            conn.setRequestProperty("Accept", "application/json");
+
+            if (conn.getResponseCode() != 200) {
+                throw new RuntimeException("Failed : HTTP error code : "
+                        + conn.getResponseCode());
+            }
+
+            BufferedReader br = new BufferedReader(new InputStreamReader(
+                    (conn.getInputStream())));
+
+            String output;
+
+            while ((output = br.readLine()) != null) {
+                if (!output.equals("{}")) {
+                    ObjectMapper mapper = new ObjectMapper();
+                    JsonNode actualObj = mapper.readTree(output);
+                    sllum = Double.parseDouble(actualObj.get("value").asText());
+                }
+            }
+            conn.disconnect();
+        } catch (MalformedURLException e) {
+            e.printStackTrace();
+        } catch (IOException e1) {
+            e1.printStackTrace();
+        }
+
+        if (sllum != 0.0){
+            lum = (lum + 500) / 2;
+        }
+
         return lum;
     }
 
-    private boolean getMovement(Calendar cal){
+    private boolean getMovement(Calendar cal, String sensorId){
         boolean mov= false;
         int hours_day= cal.get(Calendar.HOUR_OF_DAY);
         switch (sensorId){
@@ -152,5 +229,35 @@ class SensorData extends Thread{
         }
         return mov;
     }
+}
 
+
+class SensorData extends Thread{
+
+    private IMqttClient client;
+    private Random rnd = new Random();
+    private String sensorId;
+    private PublishersSR publishersSR;
+
+    public SensorData(IMqttClient client, String sensorId, PublishersSR publishersSR) {
+        this.client = client;
+        this.sensorId= sensorId;
+        this.publishersSR= publishersSR;
+    }
+
+    @Override
+    public void run() {
+
+        if ( !client.isConnected()) {
+            return ;
+        }
+        while (true) {
+            publishersSR.publishMessage(client, sensorId);
+            try {
+                Thread.sleep(60*1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+    }
 }
